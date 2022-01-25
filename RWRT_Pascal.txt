@@ -1,0 +1,1581 @@
+unit Unit1;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, Gauges, StrUtils, math;
+
+type NodeInformation = record
+    Node: string;
+    degree: integer;
+    IsGO: byte;
+    Visited: byte;
+    GONums: integer;
+    DomainNums: integer;
+    Complex_Num: integer;
+    Unknown: byte;
+    Valid_ID: integer;
+    Recall: Double;
+    Precision: Double;
+  end;
+
+type EdgeInfo = record
+    BeginNode: integer;
+    EndNode: integer;
+    ECC: Double;
+    Domain: Double;
+    FS: Double;
+    //PCC: Double;
+  end;
+
+type EInfo = record
+    EEC: Double;
+    FS: Double;
+    Weight: Double;
+    Flag: byte;
+    Node_Index: integer;
+    Domain: Double;
+    Common_Neighbor: integer;
+  end;
+
+type QueueInfo = record
+    level: integer;
+    Index: integer;
+    value: double;
+  end;
+
+type
+  TForm1 = class(TForm)
+    Gauge1: TGauge;
+    Memo1: TMemo;
+    Memo2: TMemo;
+    CheckBox1: TCheckBox;
+    RadioButton1: TRadioButton;
+    RadioButton2: TRadioButton;
+    RadioButton3: TRadioButton;
+    Memo3: TMemo;
+    Edit2: TEdit;
+    Button12: TButton;
+    Edit3: TEdit;
+    Button2: TButton;
+    Button9: TButton;
+    CheckBox2: TCheckBox;
+    Button1: TButton;
+    Button6: TButton;
+    Edit1: TEdit;
+    procedure Button12Click(Sender: TObject);
+    procedure Button2Click(Sender: TObject);
+    procedure Button9Click(Sender: TObject);
+    procedure Button1Click(Sender: TObject);
+  private
+    function Get_DomainSimi(M, S, A, B: integer): double;
+
+
+    procedure TensorRank;
+
+  public
+    { Public declarations }
+  end;
+
+var
+  Form1: TForm1;
+  NodeInfo: array of NodeInformation;
+  Edge_Info: array of EdgeInfo;
+  MatrixEdge: array of array of EInfo;
+
+  Domain, GO, Nodes: TStringList;
+  Matrix_GO: array of array of byte;
+  Matrix_Domain, Matrix_Complex: array of array of byte;
+  Matrix_Edge: array of array of array[0..2] of single;
+  Complex_Node_Set: array of array of integer;
+
+  Valid_Proteins: array of integer;
+  Neighbor_list: array of array of integer;
+  New_Matrix: array of array of single;
+  Protein_list: array of array of integer;
+  Queue: array of QueueInfo;
+  ECC, Value1, Value2, Value3, Value4, Value5: array of array of double;
+  max1, max2, max3, max4, max5, min1, min2, min3, min4, min5: double;
+implementation
+
+{$R *.dfm}
+
+
+function TForm1.Get_DomainSimi(M, S, A, B: integer): double;
+var
+  i, j, k, MaxCircle: integer;
+  ret, temp1, temp2: extended;
+  Fac: array[1..9] of integer;
+begin
+  if A <> 0 then
+    fac[1] := A
+  else
+    fac[1] := 1;
+  if M - A <> 0 then
+    fac[2] := M - A
+  else
+    fac[2] := 1;
+  if B <> 0 then
+    fac[3] := B
+  else
+    fac[3] := 1;
+  if M - B <> 0 then
+    fac[4] := M - B
+  else
+    fac[4] := 1;
+  if S <> 0 then
+    fac[5] := S
+  else
+    fac[5] := 1;
+  if A - S <> 0 then
+    fac[6] := A - S
+  else
+    fac[6] := 1;
+  if B - S <> 0 then
+    fac[7] := B - S
+  else
+    Fac[7] := 1;
+  if M - A - B + S <> 0 then
+    fac[8] := M - A - B + S
+  else
+    fac[8] := 1;
+  fac[9] := M;
+
+  MaxCircle := 0;
+  for j := 1 to 9 do
+    if MaxCircle < fac[j] then
+      MaxCircle := fac[j];
+
+  ret := 1;
+  try
+    for j := 1 to MaxCircle do
+    begin
+      temp1 := 1;
+      for k := 1 to 4 do
+        temp1 := temp1 * Fac[k];
+      temp2 := 1;
+      for k := 5 to 9 do
+        temp2 := temp2 * Fac[k];
+      ret := ret * temp1 / temp2;
+
+      for i := 1 to 9 do
+        if Fac[i] > 1 then
+          Fac[i] := Fac[i] - 1
+        else
+          Fac[i] := 1;
+    end;
+    ret := 0 - log10(ret);
+  except
+    ret := 0;
+  end;
+  Result := ret;
+end;
+
+
+
+//----- Construction of the functional similarity tensor---------------
+
+procedure TForm1.Button2Click(Sender: TObject);
+var
+  i, j, k, Begin_pos, End_Pos, IPos, index, totalnum, Samples, L, m, a, b, a_b: integer;
+  neighbors, Domain_weighted, Diff1, Diff2, P1, P2, Complex_Weight: double;
+  s, s1: string;
+  LoadFile: TStringList;
+  ChangeNode: NodeInformation;
+  sub_score: array of double;
+  Weighted: Boolean;
+  Matrix_Complex: array of array of integer;
+  Select_Proteins: array of integer;
+begin
+  button2.Enabled := false;
+
+  LoadFile := TStringList.Create;
+  Nodes := TStringList.Create;
+  Nodes.Clear;
+  Nodes.Sorted := True;
+  LoadFile.LoadFromFile('biogrid_2017.txt');
+  Gauge1.MaxValue := LoadFile.Count - 1;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+      Nodes.Add(s1);
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    if IPos = 0 then
+    begin
+      End_Pos := Nodes.IndexOf(s);
+      s1 := s;
+    end
+    else
+    begin
+      s1 := Copy(s, 1, IPos - 1);
+      End_Pos := Nodes.IndexOf(s1);
+    end;
+    if End_Pos < 0 then
+      Nodes.Add(s1);
+    Application.ProcessMessages;
+  end;
+
+  setlength(Edge_Info, 0);
+  setlength(Edge_Info, LoadFile.Count);
+  setlength(MatrixEdge, 0);
+  setlength(MatrixEdge, nodes.Count);
+  setlength(Neighbor_list, nodes.Count);
+
+  for i := 0 to nodes.Count - 1 do
+  begin
+    setlength(MatrixEdge[i], nodes.Count);
+    setlength(Neighbor_list[i], 0);
+    //Neighbor_list[i][0] := i;
+  end;
+  setlength(NodeInfo, 0);
+  setlength(NodeInfo, Nodes.Count);
+  Weighted := False;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if NodeInfo[Begin_pos].Node = '' then
+    begin
+      NodeInfo[Begin_pos].Node := s1;
+      NodeInfo[Begin_pos].degree := 0;
+      //NodeInfo[Begin_pos].Score := -10000;
+      NodeInfo[Begin_pos].GoNums := 0;
+    end;
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    if IPos = 0 then
+    begin
+      End_Pos := Nodes.IndexOf(s);
+      s1 := s;
+    end
+    else
+    begin
+      s1 := Copy(s, 1, IPos - 1);
+      Delete(s, 1, IPos);
+      End_Pos := Nodes.IndexOf(s1);
+      Weighted := True;
+    end;
+    if NodeInfo[End_Pos].Node = '' then
+    begin
+      NodeInfo[End_Pos].Node := s1;
+      NodeInfo[End_Pos].degree := 0;
+      //NodeInfo[End_Pos].Score := -10000;
+      NodeInfo[End_Pos].GoNums := 0;
+    end;
+    Edge_Info[i].BeginNode := Begin_pos;
+    Edge_Info[i].EndNode := End_Pos;
+    if Weighted = True then
+      Edge_Info[i].ECC := StrToFloat(s)
+    else
+      Edge_Info[i].ECC := 0;
+
+    MatrixEdge[Begin_pos][End_Pos].Flag := 1;
+    MatrixEdge[End_Pos][Begin_pos].Flag := 1;
+    NodeInfo[End_Pos].degree := NodeInfo[End_Pos].degree + 1;
+    NodeInfo[Begin_pos].degree := NodeInfo[Begin_pos].degree + 1;
+
+    if (Begin_pos <> End_Pos) then
+    begin
+      for j := 0 to high(Neighbor_list[Begin_pos]) do
+      begin
+        if Neighbor_list[Begin_pos][j] = End_Pos then
+          break;
+        Application.ProcessMessages;
+      end;
+      if j <= high(Neighbor_list[Begin_pos]) then
+        continue;
+      for j := 0 to high(Neighbor_list[End_Pos]) do
+      begin
+        if Neighbor_list[End_Pos][j] = Begin_pos then
+          break;
+        Application.ProcessMessages;
+      end;
+      if j <= high(Neighbor_list[End_Pos]) then
+        continue;
+
+      setlength(Neighbor_list[Begin_pos], length(Neighbor_list[Begin_pos]) + 1);
+      Neighbor_list[Begin_pos][high(Neighbor_list[Begin_pos])] := End_Pos;
+      setlength(Neighbor_list[End_Pos], length(Neighbor_list[End_Pos]) + 1);
+      Neighbor_list[End_Pos][high(Neighbor_list[End_Pos])] := Begin_pos;
+    end;
+
+
+    Application.ProcessMessages;
+  end;
+
+
+  GO := TStringList.Create;
+  GO.Clear;
+  GO.Sorted := True;
+  if Radiobutton1.Checked then
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_P.txt')
+  else if Radiobutton2.Checked then
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_F.txt')
+  else
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_C.txt');
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  k := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+    begin
+      continue;
+    end;
+    Delete(s, 1, IPos);
+    End_Pos := GO.IndexOf(s);
+    if End_Pos < 0 then
+      GO.Add(s);
+    Application.ProcessMessages;
+  end;
+
+  setlength(Matrix_GO, 0);
+  setlength(Matrix_GO, Nodes.Count, GO.Count);
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    Delete(s, 1, IPos);
+    End_Pos := GO.IndexOf(s);
+    if (Begin_Pos >= 0) and (End_Pos >= 0) then
+    begin
+      Matrix_GO[Begin_pos][End_Pos] := 1;
+      NodeInfo[Begin_pos].GONums := NodeInfo[Begin_pos].GONums + 1;
+    end;
+    Application.ProcessMessages;
+  end;
+
+
+  setlength(Valid_Proteins, 0);
+  for i := low(NodeInfo) to high(NodeInfo) do
+  begin
+    if NodeInfo[i].GoNums = 0 then
+    begin
+      NodeInfo[i].Valid_ID := -1;
+      continue;
+    end;
+    setlength(Valid_Proteins, length(Valid_Proteins) + 1);
+    Valid_Proteins[high(Valid_Proteins)] := i;
+    NodeInfo[i].Valid_ID := high(Valid_Proteins);
+  end;
+  max1 := 0; max2 := 0; max3 := 0; max4 := 0; max5 := 0;
+  min1 := 10000; min2 := 10000; min3 := 10000; min4 := 10000; min5 := 10000;
+
+  LoadFile.LoadFromFile('weight.txt');
+  Gauge1.MaxValue := LoadFile.Count - 1;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  setlength(ECC, length(Valid_Proteins), length(Valid_Proteins));
+  setlength(Value1, length(Valid_Proteins), length(Valid_Proteins));
+  setlength(Value2, length(Valid_Proteins), length(Valid_Proteins));
+  setlength(Value3, length(Valid_Proteins), length(Valid_Proteins));
+  setlength(Value4, length(Valid_Proteins), length(Valid_Proteins));
+  setlength(Value5, length(Valid_Proteins), length(Valid_Proteins));
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    End_Pos := Nodes.IndexOf(s1);
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    ECC[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s1);
+    ECC[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s1);
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    value1[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s1);
+    value1[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s1);
+    if value1[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] > max1 then
+      max1 := value1[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+    if value1[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] < min1 then
+      min1 := value1[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    value2[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s1);
+    value2[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s1);
+    if value2[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] > max2 then
+      max2 := value2[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+    if value2[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] < min2 then
+      min2 := value2[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    value3[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s1);
+    value3[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s1);
+    if value3[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] > max3 then
+      max3 := value3[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+    if value3[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] < min3 then
+      min3 := value3[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    value4[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s1);
+    value4[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s1);
+    if value4[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] > max4 then
+      max4 := value4[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+    if value4[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] < min4 then
+      min4 := value4[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+
+
+    Delete(s, 1, IPos);
+    value5[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] := StrtoFloat(s);
+    value5[Nodeinfo[End_Pos].Valid_ID][Nodeinfo[Begin_pos].Valid_ID] := StrtoFloat(s);
+    if value5[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] > max5 then
+      max5 := value5[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+    if value5[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID] < min5 then
+      min5 := value5[Nodeinfo[Begin_pos].Valid_ID][Nodeinfo[End_Pos].Valid_ID];
+
+    Application.ProcessMessages;
+  end;
+
+
+  setlength(Complex_Node_Set, 0);
+  LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'complexes.txt');
+  //LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'complex_CLUsterONE.txt');
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    s := LoadFile.Strings[i];
+    if LeftStr(s, 7) = 'Complex' then
+    begin
+      s := ReverseString(s);
+      j := 1;
+      s1 := '';
+      while true do
+      begin
+        if (s[j] = ' ') or (s[j] = #9) then
+          break;
+        s1 := s1 + s[j];
+        Inc(j);
+      end;
+      s1 := ReverseString(s1);
+      setlength(Complex_Node_Set, length(Complex_Node_Set) + 1);
+      setlength(Complex_Node_Set[high(Complex_Node_Set)], StrToInt(s1));
+      Index := 0;
+    end
+    else
+    begin
+      IPos := Nodes.IndexOf(s);
+      if Nodes.IndexOf(s) >= 0 then
+        Complex_Node_Set[high(Complex_Node_Set)][Index] := IPos;
+      Inc(Index);
+    end;
+  end;
+
+  setlength(Matrix_Complex, Nodes.Count, length(Complex_Node_Set));
+  for i := 0 to Nodes.Count - 1 do
+  begin
+    Index := 0;
+    for j := 0 to high(Complex_Node_Set) do
+    begin
+      for k := 0 to high(Complex_Node_Set[j]) do
+        if Complex_Node_Set[j][k] = i then
+          break;
+      if k <= high(Complex_Node_Set[j]) then
+        Matrix_Complex[i][j] := 1
+      else
+        Matrix_Complex[i][j] := 0;
+
+      Index := Index + Matrix_Complex[i][j];
+    end;
+    NodeInfo[i].Complex_Num := Index;
+    Application.ProcessMessages;
+  end;
+
+  Domain := TStringList.Create;
+  Domain.Clear;
+  Domain.Sorted := True;
+  LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'Domain.txt');
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  k := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+    begin
+      continue;
+    end;
+    Delete(s, 1, IPos);
+    End_Pos := Domain.IndexOf(s);
+    if End_Pos < 0 then
+      Domain.Add(s);
+    Application.ProcessMessages;
+  end;
+
+  setlength(Matrix_Domain, 0);
+  setlength(Matrix_Domain, Nodes.Count, Domain.Count);
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    Delete(s, 1, IPos);
+    End_Pos := Domain.IndexOf(s);
+    if (Begin_Pos >= 0) and (End_Pos >= 0) then
+    begin
+      Matrix_Domain[Begin_pos][End_Pos] := 1;
+      NodeInfo[Begin_pos].DomainNums := NodeInfo[Begin_pos].DomainNums + 1;
+    end;
+    Application.ProcessMessages;
+  end;
+
+    //--------------------------------
+  setlength(Valid_Proteins, 0);
+  for i := low(NodeInfo) to high(NodeInfo) do
+  begin
+    if NodeInfo[i].GoNums = 0 then
+      continue;
+    setlength(Valid_Proteins, length(Valid_Proteins) + 1);
+    Valid_Proteins[high(Valid_Proteins)] := i;
+  end;
+
+  //----------------------------------------------------------------------------
+  Button2.Enabled := True;
+end;
+
+//---------------Random walk with restart on the tensor T-----------------
+
+procedure TForm1.TensorRank;
+var
+  i, j, k, n, h, MaxRange, Nums, para, l, Predicted_Num: integer;
+  Temp, Temp2, old_temp, old_Temp2, a: double;
+  norm: Extended;
+  Tensor_1, Tensor_2: array of array of array[0..2] of single;
+  Edge_Prob: array of single;
+  pr_Node, NewPr_Node, pr_Edge, Newpr_Edge, pr0: array of single;
+  Total_Nums, TP, FP, GO_Nums, GO_Index: array of integer;
+  Go_Scores: array of single;
+  Recall, Precision: array of double;
+  New_Weight: array of array of double;
+  s: string;
+  f: textfile;
+begin
+  for i := low(Valid_Proteins) to high(Valid_Proteins) - 1 do
+    for j := i + 1 to high(Valid_Proteins) do
+    begin
+      value2[i][j] := (value2[i][j] - min2) / (max2 - min2);
+      value4[i][j] := (value4[i][j] - min4) / (max4 - min4);
+      value5[i][j] := (value5[i][j] - min5) / (max5 - min5);
+      value2[j][i] := value2[i][j];
+      value4[j][i] := value4[i][j];
+      value5[j][i] := value5[i][j];
+    end;
+
+  a := strtofloat(Edit1.Text);
+  setlength(Tensor_1, length(Valid_Proteins));
+  setlength(Tensor_2, length(Valid_Proteins));
+  setlength(pr0, length(Valid_Proteins));
+  setlength(pr_Node, length(Valid_Proteins));
+  setlength(NewPr_Node, length(Valid_Proteins));
+  setlength(pr_edge, 3);
+  setlength(newpr_edge, 3);
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+  begin
+    setlength(Tensor_1[i], length(Valid_Proteins));
+    setlength(Tensor_2[i], length(Valid_Proteins));
+  end;
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    for j := low(Valid_Proteins) to high(Valid_Proteins) do
+      for k := 0 to 2 do
+      begin
+        if k = 0 then
+          Tensor_1[i][j][k] := ecc[i][j]
+        else if k = 1 then
+          Tensor_1[i][j][k] := value4[i][j]
+        else
+          Tensor_1[i][j][k] := value5[i][j];
+
+         // Tensor_1[i][j][k] := Matrix_Edge[Valid_Proteins[i]][Valid_Proteins[j]][k];
+        Tensor_2[i][j][k] := Tensor_1[i][j][k];
+      end;
+  setlength(Edge_Prob, 3);
+  for i := 0 to 2 do
+    Edge_Prob[i] := 1.0 / 3;
+
+  for k := 0 to 2 do
+    for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    begin
+      Temp := 0;
+      for j := low(Valid_Proteins) to high(Valid_Proteins) do
+        Temp := Temp + Tensor_1[i][j][k];
+
+      for j := low(Valid_Proteins) to high(Valid_Proteins) do
+        if Temp <> 0 then
+          Tensor_1[i][j][k] := Tensor_1[i][j][k] / Temp
+        else
+          //Tensor_1[i][j][k] := NodeInfo[i].O_Score / nodes.Count;
+          Tensor_1[i][j][k] := 1.0 / length(Valid_Proteins);
+    end;
+
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    for j := low(Valid_Proteins) to high(Valid_Proteins) do
+    begin
+      Temp := 0;
+      for k := 0 to 2 do
+        Temp := Temp + Tensor_2[i][j][k];
+
+      for k := 0 to 2 do
+        if Temp <> 0 then
+          Tensor_2[i][j][k] := Tensor_2[i][j][k] / Temp
+        else
+          Tensor_2[i][j][k] := 1 / 3;
+    end;
+  setlength(New_Matrix, length(Valid_Proteins));
+  //----------------------------------------------------------------------------
+  Gauge1.MaxValue := length(Valid_Proteins);
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+
+  for n := low(Valid_Proteins) to high(Valid_Proteins) do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+
+    setlength(New_Matrix[n], length(Valid_Proteins));
+    if (CheckBox1.Checked = True) and (NodeInfo[Valid_Proteins[n]].Unknown = 0) then continue;
+    Inc(Predicted_Num);
+
+    for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    begin
+      pr0[i] := value2[n][i] + value5[n][i];
+      NewPr_Node[i] := 1.0 / length(Valid_Proteins);
+      pr_Node[i] := 0;
+    end;
+
+    for i := 0 to 2 do
+    begin
+      NewPr_Edge[i] := Edge_Prob[i];
+      pr_Edge[i] := 0;
+    end;
+
+    for h := 0 to 19 do
+    begin
+      Temp := 0;
+      for i := low(Valid_Proteins) to high(Valid_Proteins) do
+        Temp := Temp + abs(pr_Node[i] - NewPr_Node[i]);
+
+      Temp2 := 0;
+      for i := 0 to 2 do
+        Temp2 := Temp2 + abs(pr_Edge[i] - NewPr_Edge[i]);
+
+      if Temp * power(10, 3) < 1 then
+        break;
+
+      for i := low(Valid_Proteins) to high(Valid_Proteins) do
+        pr_Node[i] := NewPr_Node[i];
+      for k := 0 to 2 do
+        pr_Edge[k] := NewPr_Edge[k];
+
+      for i := low(Valid_Proteins) to high(Valid_Proteins) do
+      begin
+        norm := 0;
+        for j := low(Valid_Proteins) to high(Valid_Proteins) do
+          for k := 0 to 2 do
+            norm := norm + Tensor_1[i][j][k] * pr_Node[j] * Edge_Prob[k];
+        NewPr_Node[i] := (1 - a) * pr0[i] + a * norm;
+       // NewPr_Node[i] := norm;
+      end; //for i := 0 to nodes.Count - 1 do
+
+      for k := 0 to 2 do
+      begin
+        norm := 0;
+        for i := low(Valid_Proteins) to high(Valid_Proteins) do
+          for j := low(Valid_Proteins) to high(Valid_Proteins) do
+            norm := norm + Tensor_2[i][j][k] * NewPr_Node[i] * pr_Node[j];
+        newpr_edge[k] := norm;
+      end; // for k:=0 to 2 do
+
+      application.ProcessMessages;
+    end; //while 1 = 1 do
+
+    for j := low(Valid_Proteins) to high(Valid_Proteins) do
+      New_Matrix[n][j] := NewPr_Node[j];
+  end; // for n := low(Valid_Proteins) to high(Valid_Proteins) do
+
+  s := ExtractFilePath(Application.ExeName) + 'Tensor_weight_biogrid.txt';
+  Assignfile(f, pchar(s));
+  rewrite(f);
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    for j := 0 to high(Valid_Proteins) do
+    begin
+      s := Inttostr(i) + #9 + Inttostr(j) + #9 + FloatTostr(New_Matrix[i][j]);
+      Writeln(f, s);
+    end;
+  CloseFile(f);
+end;
+
+//----------------Computational annotation of proteins with unknown functions---
+
+procedure TForm1.Button9Click(Sender: TObject);
+var
+  i, j, k, n, h, MaxRange, Nums, para, l, Predicted_Num, ipos, selected, Certain_Go_Num, TotalNum, Predict_Functions: integer;
+  Temp, Temp2, old_temp, old_Temp2, MaxVlue, Value, Current_Density, In_Density, out_Density, Temp_Density, AUPR, AUROC: double;
+  Candidate_Index, Neighbor_Set, Temp_set: array of integer;
+  Candidate_GO: array of integer;
+  candidate_protein_score, Go_Scores, GO_Nums: array of double;
+  Total_Nums, GO_index: array of integer;
+  Rec, Pre: array of double;
+  New_Weight: array of array of double;
+  predictedFunctions, s, s1: string;
+  f: textfile;
+  Recall_TPR, Precision, FPR: array of double;
+begin
+  Button9.Enabled := False;
+  TensorRank;
+  Memo2.Lines.Clear;
+  setlength(New_Matrix, length(Valid_Proteins));
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    setlength(New_Matrix[i], length(Valid_Proteins));
+  Gauge1.MaxValue := length(Valid_Proteins);
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+
+  s := ExtractFilePath(Application.ExeName) + 'Tensor_weight_biogrid.txt';
+  Assignfile(f, pchar(s));
+  reset(f);
+  while not Eof(F) do
+  begin
+    ReadLn(F, k, n, Temp);
+    New_Matrix[k][n] := Temp;
+    Gauge1.Progress := k + 1;
+    Application.ProcessMessages;
+  end;
+
+  //----------------------------------------------------------------------------
+
+  if checkbox2.Checked = false then
+    para := 1
+  else
+    para := 267;
+  setlength(Total_Nums, para);
+  setlength(Precision, para);
+  setlength(Recall_TPR, para);
+  setlength(FPR, para);
+  for l := 0 to high(Total_Nums) do
+  begin
+    Total_Nums[l] := 0;
+    Precision[l] := 0;
+    Recall_TPR[l] := 0;
+    FPR[l] := 0;
+  end;
+  Predicted_Num := 0;
+  //----------------------------------------------------------------------------
+  setlength(Protein_list, length(Valid_Proteins));
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+    for j := i + 1 to high(Valid_Proteins) do
+      if New_Matrix[i][j] > 0 then
+      begin
+
+        setlength(Protein_list[i], length(Protein_list[i]) + 1);
+        Protein_list[i][high(Protein_list[i])] := j;
+
+        setlength(Protein_list[j], length(Protein_list[j]) + 1);
+        Protein_list[j][high(Protein_list[j])] := i;
+      end;
+  //----------------------------------------------------------------------------
+  Gauge1.MaxValue := length(Valid_Proteins);
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+
+  setlength(GO_nums, Go.Count);
+  setlength(GO_scores, Go.Count);
+  setlength(Go_index, Go.Count);
+
+  for n := low(Valid_Proteins) to high(Valid_Proteins) do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    if (CheckBox1.Checked = True) and (NodeInfo[Valid_Proteins[n]].Unknown = 0) then continue;
+    Inc(Predicted_Num);
+
+    setlength(Candidate_Index, 0);
+   // if length(Protein_list[n]) > nodeinfo[Valid_Proteins[n]].degree then
+    MaxVlue := 0;
+    for i := 0 to high(Protein_list[n]) do
+    begin
+      if (CheckBox1.Checked = True) and (NodeInfo[Valid_Proteins[Protein_list[n][i]]].Unknown = 1) then continue;
+      In_Density := 0;
+      for k := 0 to high(Protein_list[n]) do
+        if k <> i then
+          In_Density := In_Density + New_Matrix[Protein_list[n][i]][Protein_list[n][k]];
+
+      out_Density := 0;
+      for j := 0 to high(Valid_Proteins) do
+      begin
+        for k := 0 to high(Protein_list[n]) do
+          if (Protein_list[n][k] = j) then
+            break;
+        if k <= high(Protein_list[n]) then
+          continue;
+        out_Density := out_Density + New_Matrix[Protein_list[n][i]][j];
+      end;
+
+      Temp_Density := In_Density / (In_Density + out_Density);
+
+      if Temp_Density >= 0.33 then
+      begin
+        setlength(Candidate_Index, length(Candidate_Index) + 1);
+        Candidate_Index[high(Candidate_Index)] := Protein_list[n][i];
+        if MaxVlue < New_Matrix[n][Protein_list[n][i]] then
+        begin
+          MaxVlue := New_Matrix[n][Protein_list[n][i]];
+          MaxRange := NodeInfo[Valid_Proteins[Protein_list[n][i]]].GONums;
+        end;
+      end
+      else
+      begin
+        setlength(Candidate_Index, length(Candidate_Index) + 1);
+        Candidate_Index[high(Candidate_Index)] := i;
+      end;
+    end;
+
+    for i := 0 to go.Count - 1 do
+    begin
+      Go_Nums[i] := 0;
+      GO_index[i] := i;
+      Go_scores[i] := 0;
+
+      for j := 0 to high(Candidate_Index) do
+        if Matrix_GO[Valid_Proteins[Candidate_Index[j]]][i] <> 0 then
+        begin
+          Go_Nums[i] := Go_Nums[i] + 1;
+          Go_scores[i] := Go_scores[i] + New_Matrix[n][Candidate_Index[j]];
+        end;
+    end; //for i := 0 to go.Count - 1 do
+
+    for j := low(Go_scores) to high(Go_scores) - 1 do
+      for k := j + 1 to high(Go_scores) do
+        if GO_Scores[j] < GO_Scores[k] then
+        begin
+          temp := GO_Scores[j];
+          GO_Scores[j] := GO_Scores[k];
+          GO_Scores[k] := temp;
+          h := GO_index[j];
+          GO_index[j] := GO_index[k];
+          GO_index[k] := h;
+        end;
+
+    for l := 0 to high(Total_Nums) do
+    begin
+      Nums := 0;
+     // IPos := MaxRange;
+     // if (IPos > l + 1) and (length(Total_Nums) > 1) then
+       // IPos := l + 1;
+      if length(Total_Nums) > 1 then
+        IPos := l + 1
+      else
+        IPos := MaxRange;
+      for j := 0 to Go.Count - 1 do
+      begin
+        if Matrix_GO[Valid_Proteins[n]][j] = 0 then
+          continue;
+        for k := 0 to IPos - 1 do
+          if GO_index[k] = j then
+          begin
+            Inc(Nums);
+            break;
+          end;
+      end;
+
+      if Nums <> 0 then
+      begin
+        Inc(Total_Nums[l]);
+      end;
+      if IPos <> 0 then
+      begin
+        Precision[l] := Precision[l] + 1.0 * Nums / IPos;
+        FPR[l] := FPR[l] + 1.0 * (IPos - Nums) / IPos;
+      end;
+      Recall_TPR[l] := Recall_TPR[l] + 1.0 * Nums / (NodeInfo[Valid_Proteins[n]].GONums);
+
+    end; //for l := 0 to high(Total_Nums1) do
+    Memo2.Lines.Add(NodeInfo[Valid_Proteins[n]].Node + #9 + IntToStr(Nums) + #9 + FloatToStr(MaxRange) + #9 + IntToStr(NodeInfo[Valid_Proteins[n]].GONums));
+
+
+    application.ProcessMessages;
+  end; // for n := low(Valid_Proteins) to high(Valid_Proteins) do
+
+
+  AUPR := 0; AUROC := 0;
+  for l := 0 to high(Total_Nums) do
+  begin
+    Precision[l] := Precision[l] / Predicted_Num;
+    Recall_TPR[l] := Recall_TPR[l] / Predicted_Num;
+    FPR[l] := FPR[l] / Predicted_Num;
+      //S := IntToStr(Total_Nums1[l]) + #9 + Format('%.4f', [Precision1[l]]) + #9 + Format('%.4f', [Recall1[l]]) + #9 + Format('%.4f', [2 * Precision1[l] * Recall1[l] / (Precision1[l] + Recall1[l])]) + #9 + Format('%.3f', [predict_funs1 * 1.0 / bench_funs]) + #9 + IntToStr(TP1[l]) + #9 + IntToStr(FP1[l]) + #9 + 'Zhang';
+    S := Format('%.4f', [Recall_TPR[l]]) + #9 + Format('%.4f', [Precision[l]]) + #9 + Format('%.4f', [2 * Precision[l] * Recall_TPR[l] / (Precision[l] + Recall_TPR[l])]) + #9 + Format('%.4f', [FPR[l]]) + #9 + Format('%.4f', [Recall_TPR[l]]) + #9 + 'RWRT';
+    if checkbox1.Checked = true then
+      s := s + #9 + Copy(button12.Caption, 9, length(button12.Caption) - 8);
+    Memo1.Lines.Add(S);
+    if (checkbox2.Checked = true) and (l > 0) then
+    begin
+      AUPR := AUPR + (Precision[l] + Precision[l - 1]) * (Recall_TPR[l] - Recall_TPR[l - 1]) * 0.5;
+      AUROC := AUROC + (Recall_TPR[l] + Recall_TPR[l - 1]) * (FPR[l] - FPR[l - 1]) * 0.5;
+    end;
+  end;
+ // Memo1.Lines.Add(Format('%.4f', [AUPR]) + #9 + Format('%.4f', [AUROC]) + #9 + 'RWRT');
+  Memo2.Lines.SaveToFile('RWRT.txt');
+  Button9.Enabled := True;
+  setlength(New_Matrix, 0);
+end;
+
+//------------------Weighting----------------------------------------------
+procedure TForm1.Button1Click(Sender: TObject);
+var
+  i, j, k, h, l, Begin_pos, End_Pos, IPos, index, a1, b1, a_b1, a2, b2, a_b2, a3, b3, a_b3, a4, b4, a_b4, N1, a5, b5, a_b5: integer;
+  neighbors, Diff1, Diff2, v_ecc, value1, value2, value3, value4, value5: double;
+  s, s1, WriteStr, S_Ecc, S_Zhang, S_DCS, S_DSCP: string;
+  LoadFile: TStringList;
+ // NodeInfo: array of NodeInformation;
+  ChangeNode: NodeInformation;
+  complex_score: array of double;
+  Weighted, contained: Boolean;
+  Matrix_Complex: array of array of integer;
+  Select_Proteins: array of integer;
+  Neighbor_Domain, Neighbor_Complex_Domain, Neighbor_Self_Domain: array of array of integer;
+
+  f: textfile;
+begin
+  Button1.Enabled := False;
+
+  LoadFile := TStringList.Create;
+  Nodes := TStringList.Create;
+  Nodes.Clear;
+  Nodes.Sorted := True;
+  LoadFile.LoadFromFile('biogrid_2017.txt');
+  Gauge1.MaxValue := LoadFile.Count - 1;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+      Nodes.Add(s1);
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    if IPos = 0 then
+    begin
+      End_Pos := Nodes.IndexOf(s);
+      s1 := s;
+    end
+    else
+    begin
+      s1 := Copy(s, 1, IPos - 1);
+      End_Pos := Nodes.IndexOf(s1);
+    end;
+    if End_Pos < 0 then
+      Nodes.Add(s1);
+    Application.ProcessMessages;
+  end;
+
+  setlength(Edge_Info, 0);
+  setlength(Edge_Info, LoadFile.Count);
+  setlength(MatrixEdge, 0);
+  setlength(MatrixEdge, nodes.Count);
+  setlength(Neighbor_list, nodes.Count);
+
+  for i := 0 to nodes.Count - 1 do
+  begin
+    setlength(MatrixEdge[i], nodes.Count);
+    setlength(Neighbor_list[i], 0);
+    //Neighbor_list[i][0] := i;
+  end;
+  setlength(NodeInfo, 0);
+  setlength(NodeInfo, Nodes.Count);
+  Weighted := False;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if NodeInfo[Begin_pos].Node = '' then
+    begin
+      NodeInfo[Begin_pos].Node := s1;
+      NodeInfo[Begin_pos].degree := 0;
+      //NodeInfo[Begin_pos].Score := -10000;
+      NodeInfo[Begin_pos].GoNums := 0;
+    end;
+    Delete(s, 1, IPos);
+    IPos := pos(#9, s);
+    if IPos = 0 then
+    begin
+      End_Pos := Nodes.IndexOf(s);
+      s1 := s;
+    end
+    else
+    begin
+      s1 := Copy(s, 1, IPos - 1);
+      Delete(s, 1, IPos);
+      End_Pos := Nodes.IndexOf(s1);
+      Weighted := True;
+    end;
+    if NodeInfo[End_Pos].Node = '' then
+    begin
+      NodeInfo[End_Pos].Node := s1;
+      NodeInfo[End_Pos].degree := 0;
+      //NodeInfo[End_Pos].Score := -10000;
+      NodeInfo[End_Pos].GoNums := 0;
+    end;
+    Edge_Info[i].BeginNode := Begin_pos;
+    Edge_Info[i].EndNode := End_Pos;
+    if Weighted = True then
+      Edge_Info[i].ECC := StrToFloat(s)
+    else
+      Edge_Info[i].ECC := 0;
+
+    MatrixEdge[Begin_pos][End_Pos].Flag := 1;
+    MatrixEdge[End_Pos][Begin_pos].Flag := 1;
+    NodeInfo[End_Pos].degree := NodeInfo[End_Pos].degree + 1;
+    NodeInfo[Begin_pos].degree := NodeInfo[Begin_pos].degree + 1;
+
+    if (Begin_pos <> End_Pos) then
+    begin
+      for j := 0 to high(Neighbor_list[Begin_pos]) do
+      begin
+        if Neighbor_list[Begin_pos][j] = End_Pos then
+          break;
+        Application.ProcessMessages;
+      end;
+      if j <= high(Neighbor_list[Begin_pos]) then
+        continue;
+      for j := 0 to high(Neighbor_list[End_Pos]) do
+      begin
+        if Neighbor_list[End_Pos][j] = Begin_pos then
+          break;
+        Application.ProcessMessages;
+      end;
+      if j <= high(Neighbor_list[End_Pos]) then
+        continue;
+
+      setlength(Neighbor_list[Begin_pos], length(Neighbor_list[Begin_pos]) + 1);
+      Neighbor_list[Begin_pos][high(Neighbor_list[Begin_pos])] := End_Pos;
+      setlength(Neighbor_list[End_Pos], length(Neighbor_list[End_Pos]) + 1);
+      Neighbor_list[End_Pos][high(Neighbor_list[End_Pos])] := Begin_pos;
+    end;
+    Application.ProcessMessages;
+  end; //for i := 0 to LoadFile.Count - 1 do
+
+  GO := TStringList.Create;
+  GO.Clear;
+  GO.Sorted := True;
+  if Radiobutton1.Checked then
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_P.txt')
+  else if Radiobutton2.Checked then
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_F.txt')
+  else
+    LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'GO_C.txt');
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  k := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+    begin
+      continue;
+    end;
+    Delete(s, 1, IPos);
+    End_Pos := GO.IndexOf(s);
+    if End_Pos < 0 then
+      GO.Add(s);
+    Application.ProcessMessages;
+  end;
+  setlength(Matrix_GO, 0);
+  setlength(Matrix_GO, Nodes.Count, GO.Count);
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    Delete(s, 1, IPos);
+    End_Pos := GO.IndexOf(s);
+    if (Begin_Pos >= 0) and (End_Pos >= 0) then
+    begin
+      Matrix_GO[Begin_pos][End_Pos] := 1;
+      NodeInfo[Begin_pos].GONums := NodeInfo[Begin_pos].GONums + 1;
+    end;
+    Application.ProcessMessages;
+  end;
+
+
+  setlength(Complex_Node_Set, 0);
+  LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'complexes.txt');
+  //LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'complex_CLUsterONE.txt');
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    s := LoadFile.Strings[i];
+    if LeftStr(s, 7) = 'Complex' then
+    begin
+      s := ReverseString(s);
+      j := 1;
+      s1 := '';
+      while true do
+      begin
+        if (s[j] = ' ') or (s[j] = #9) then
+          break;
+        s1 := s1 + s[j];
+        Inc(j);
+      end;
+      s1 := ReverseString(s1);
+      setlength(Complex_Node_Set, length(Complex_Node_Set) + 1);
+      setlength(Complex_Node_Set[high(Complex_Node_Set)], StrToInt(s1));
+      Index := 0;
+    end
+    else
+    begin
+      IPos := Nodes.IndexOf(s);
+      if Nodes.IndexOf(s) >= 0 then
+        Complex_Node_Set[high(Complex_Node_Set)][Index] := IPos;
+      Inc(Index);
+    end;
+  end;
+
+  setlength(Matrix_Complex, Nodes.Count, length(Complex_Node_Set));
+  for i := 0 to Nodes.Count - 1 do
+  begin
+    Index := 0;
+    for j := 0 to high(Complex_Node_Set) do
+    begin
+      for k := 0 to high(Complex_Node_Set[j]) do
+        if Complex_Node_Set[j][k] = i then
+          break;
+      if k <= high(Complex_Node_Set[j]) then
+        Matrix_Complex[i][j] := 1
+      else
+        Matrix_Complex[i][j] := 0;
+      Index := Index + Matrix_Complex[i][j];
+    end;
+    NodeInfo[i].Complex_Num := Index;
+    Application.ProcessMessages;
+  end;
+
+
+  setlength(complex_score, length(Complex_Node_Set));
+  for j := 0 to high(Complex_Node_Set) do
+  begin
+    complex_score[j] := 0;
+    for l := 0 to high(Complex_Node_Set[j]) - 1 do
+      for h := l + 1 to high(Complex_Node_Set[j]) do
+        complex_score[j] := complex_score[j] + MatrixEdge[Complex_Node_Set[j][l]][Complex_Node_Set[j][h]].Flag;
+    complex_score[j] := 2 * complex_score[j] / (length(Complex_Node_Set[j]) * (length(Complex_Node_Set[j]) - 1));
+  end;
+
+  Domain := TStringList.Create;
+  Domain.Clear;
+  Domain.Sorted := True;
+  LoadFile.LoadFromFile(ExtractFilePath(Application.ExeName) + 'Domain.txt');
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  k := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    if Begin_pos < 0 then
+    begin
+      continue;
+    end;
+    Delete(s, 1, IPos);
+    End_Pos := Domain.IndexOf(s);
+    if End_Pos < 0 then
+      Domain.Add(s);
+    Application.ProcessMessages;
+  end;
+
+  setlength(Matrix_Domain, 0);
+  setlength(Matrix_Domain, Nodes.Count, Domain.Count);
+  Gauge1.MaxValue := LoadFile.Count;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  for i := 0 to LoadFile.Count - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    s := LoadFile.Strings[i];
+    IPos := pos(#9, s);
+    s1 := Copy(s, 1, IPos - 1);
+    Begin_pos := Nodes.IndexOf(s1);
+    Delete(s, 1, IPos);
+    End_Pos := Domain.IndexOf(s);
+    if (Begin_Pos >= 0) and (End_Pos >= 0) then
+    begin
+      Matrix_Domain[Begin_pos][End_Pos] := 1;
+      NodeInfo[Begin_pos].DomainNums := NodeInfo[Begin_pos].DomainNums + 1;
+    end;
+    Application.ProcessMessages;
+  end;
+
+
+  setlength(Valid_Proteins, 0);
+  for i := low(NodeInfo) to high(NodeInfo) do
+  begin
+    if NodeInfo[i].GoNums = 0 then
+    begin
+      NodeInfo[i].Valid_ID := -1;
+      continue;
+    end;
+    setlength(Valid_Proteins, length(Valid_Proteins) + 1);
+    Valid_Proteins[high(Valid_Proteins)] := i;
+    NodeInfo[i].Valid_ID := high(Valid_Proteins);
+  end;
+
+  setlength(Neighbor_Domain, length(NodeInfo), 0);
+  setlength(Neighbor_Complex_Domain, length(NodeInfo), 0);
+  Gauge1.MaxValue := length(Valid_Proteins);
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+
+  for i := low(Valid_Proteins) to high(Valid_Proteins) do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+    contained := false;
+    for j := 0 to high(Complex_Node_Set) do
+      if Matrix_Complex[Valid_Proteins[i]][j] = 1 then
+      begin
+        contained := True;
+        break;
+      end;
+
+    for h := 0 to Domain.Count - 1 do
+    begin
+      if Matrix_Domain[Valid_Proteins[i]][h] = 1 then
+      begin
+        setlength(Neighbor_Complex_Domain[Valid_Proteins[i]], length(Neighbor_Complex_Domain[Valid_Proteins[i]]) + 1);
+        Neighbor_Complex_Domain[Valid_Proteins[i]][high(Neighbor_Complex_Domain[Valid_Proteins[i]])] := h;
+
+        setlength(Neighbor_Self_Domain[Valid_Proteins[i]], length(Neighbor_Self_Domain[Valid_Proteins[i]]) + 1);
+        Neighbor_Self_Domain[Valid_Proteins[i]][high(Neighbor_Self_Domain[Valid_Proteins[i]])] := h;
+        //continue;
+      end;
+
+      if (contained = True) and (Matrix_Domain[Valid_Proteins[i]][h] = 0) then
+        for j := 0 to high(Complex_Node_Set) do
+        begin
+          if Matrix_Complex[Valid_Proteins[i]][j] = 0 then
+            continue;
+          for l := 0 to high(Complex_Node_Set[j]) do
+            if (Matrix_Domain[Complex_Node_Set[j][l]][h] = 1) then
+            begin
+              setlength(Neighbor_Complex_Domain[Valid_Proteins[i]], length(Neighbor_Complex_Domain[Valid_Proteins[i]]) + 1);
+              Neighbor_Complex_Domain[Valid_Proteins[i]][high(Neighbor_Complex_Domain[Valid_Proteins[i]])] := h;
+              break;
+            end; //for l := 0 to high(Complex_Node_Set[j]) do
+          if l <= high(Complex_Node_Set[j]) then
+            break;
+        end;
+
+      for j := 0 to high(Neighbor_list[Valid_Proteins[i]]) do
+      begin
+        N1 := Neighbor_list[Valid_Proteins[i]][j];
+        if (Matrix_Domain[N1][h] = 1) then
+        begin
+          setlength(Neighbor_Domain[Valid_Proteins[i]], length(Neighbor_Domain[Valid_Proteins[i]]) + 1);
+          Neighbor_Domain[Valid_Proteins[i]][high(Neighbor_Domain[Valid_Proteins[i]])] := h;
+
+          if (Matrix_Domain[Valid_Proteins[i]][h] = 0) then
+          begin
+            setlength(Neighbor_Self_Domain[Valid_Proteins[i]], length(Neighbor_Self_Domain[Valid_Proteins[i]]) + 1);
+            Neighbor_Self_Domain[Valid_Proteins[i]][high(Neighbor_Self_Domain[Valid_Proteins[i]])] := h;
+
+            if (contained = false) then
+            begin
+              setlength(Neighbor_Complex_Domain[Valid_Proteins[i]], length(Neighbor_Complex_Domain[Valid_Proteins[i]]) + 1);
+              Neighbor_Complex_Domain[Valid_Proteins[i]][high(Neighbor_Complex_Domain[Valid_Proteins[i]])] := h;
+            end;
+          end;
+          break;
+        end;
+      end; //for j := 0 to high(Matrix_Edge[i]) do
+
+
+
+    end; //for h := 0 to Domain.Count - 1 do
+    Application.ProcessMessages;
+  end; // for i := low(Valid_Proteins) to high(Valid_Proteins) do
+
+  Gauge1.MaxValue := length(Valid_Proteins) - 1;
+  Gauge1.MinValue := 0;
+  Gauge1.Progress := 0;
+  Memo2.Lines.Clear;
+
+  s := ExtractFilePath(Application.ExeName) + 'weight.txt';
+  Assignfile(f, pchar(s));
+  rewrite(f);
+
+  for i := low(Valid_Proteins) to high(Valid_Proteins) - 1 do
+  begin
+    Gauge1.Progress := Gauge1.Progress + 1;
+
+    for j := i + 1 to high(Valid_Proteins) do
+    begin
+      WriteStr := NodeInfo[Valid_Proteins[i]].Node + #9 + NodeInfo[Valid_Proteins[j]].Node + #9;
+
+      if MatrixEdge[Valid_Proteins[i]][Valid_Proteins[j]].Flag = 1 then
+      begin
+        for k := low(NodeInfo) to high(NodeInfo) do
+        begin
+          if (k <> Valid_Proteins[i]) and (k <> Valid_Proteins[j]) then
+          begin
+            if (MatrixEdge[Valid_Proteins[i]][k].Flag = 1) and (MatrixEdge[Valid_Proteins[j]][k].Flag = 1) then
+              neighbors := neighbors + 1
+            else if (MatrixEdge[Valid_Proteins[i]][k].Flag = 1) and (MatrixEdge[Valid_Proteins[j]][k].Flag = 0) then
+              Diff1 := Diff1 + 1
+            else if (MatrixEdge[Valid_Proteins[i]][k].Flag = 0) and (MatrixEdge[Valid_Proteins[j]][k].Flag = 1) then
+              Diff2 := Diff2 + 1;
+          end; //if (k <> Edge_Info[i].BeginNode) and (k <> Edge_Info[i].EndNode) then
+          Application.ProcessMessages;
+        end; //for k := low(NodeInfo) to high(NodeInfo) do
+
+        if (Min(NodeInfo[Valid_Proteins[i]].degree, NodeInfo[Valid_Proteins[j]].degree) > 1) then
+        begin
+
+          v_ecc := (4 * power(neighbors, 2) / ((NodeInfo[Valid_Proteins[i]].degree + neighbors) * (NodeInfo[Valid_Proteins[j]].degree + neighbors)));
+        end;
+      end;
+      //if MatrixEdge[Valid_Proteins[i]][Valid_Proteins[j]].Flag = 1 then
+
+      a_b1 := 0; //
+      a1 := length(Neighbor_Domain[Valid_Proteins[i]]);
+      b1 := length(Neighbor_Domain[Valid_Proteins[j]]);
+      a_b2 := 0;
+      a2 := Nodeinfo[Valid_Proteins[i]].DomainNums;
+      b2 := Nodeinfo[Valid_Proteins[j]].DomainNums;
+      a_b3 := 0;
+      a3 := length(Neighbor_Complex_Domain[Valid_Proteins[i]]);
+      b3 := length(Neighbor_Complex_Domain[Valid_Proteins[j]]);
+      a_b4 := 0;
+      a4 := length(Neighbor_Self_Domain[Valid_Proteins[i]]);
+      b4 := length(Neighbor_Self_Domain[Valid_Proteins[j]]);
+      value1 := 0; value2 := 0; value3 := 0; value4 := 0;
+      for h := 0 to Domain.Count - 1 do
+      begin
+        a_b2 := a_b2 + Matrix_Domain[Valid_Proteins[i]][h] * Matrix_Domain[Valid_Proteins[j]][h];
+        Begin_pos := 0; End_Pos := 0;
+        for l := 0 to high(Neighbor_Domain[Valid_Proteins[i]]) do
+          if Neighbor_Domain[Valid_Proteins[i]][l] = h then
+          begin
+            Begin_pos := 1;
+            break;
+          end;
+        for l := 0 to high(Neighbor_Domain[Valid_Proteins[j]]) do
+          if Neighbor_Domain[Valid_Proteins[j]][l] = h then
+          begin
+            End_Pos := 1;
+            break;
+          end;
+        if Begin_pos * End_Pos = 1 then
+          a_b1 := a_b1 + 1;
+
+        Begin_pos := 0; End_Pos := 0;
+        for l := 0 to high(Neighbor_Complex_Domain[Valid_Proteins[i]]) do
+          if Neighbor_Complex_Domain[Valid_Proteins[i]][l] = h then
+          begin
+            Begin_pos := 1;
+            break;
+          end;
+        for l := 0 to high(Neighbor_Complex_Domain[Valid_Proteins[j]]) do
+          if Neighbor_Complex_Domain[Valid_Proteins[j]][l] = h then
+          begin
+            End_Pos := 1;
+            break;
+          end;
+        if Begin_pos * End_Pos = 1 then
+          a_b3 := a_b3 + 1;
+
+        Begin_pos := 0; End_Pos := 0;
+        for l := 0 to high(Neighbor_Self_Domain[Valid_Proteins[i]]) do
+          if Neighbor_Self_Domain[Valid_Proteins[i]][l] = h then
+          begin
+            Begin_pos := 1;
+            break;
+          end;
+        for l := 0 to high(Neighbor_Self_Domain[Valid_Proteins[j]]) do
+          if Neighbor_Self_Domain[Valid_Proteins[j]][l] = h then
+          begin
+            End_Pos := 1;
+            break;
+          end;
+        if Begin_pos * End_Pos = 1 then
+          a_b4 := a_b4 + 1;
+      end;
+
+
+      if a_b1 > 0 then
+        value1 := Get_DomainSimi(Domain.Count, a_b1, a1, b1);
+      if a_b2 > 0 then
+        value2 := Get_DomainSimi(Domain.Count, a_b2, a2, b2);
+      if a_b3 > 0 then
+        value3 := Get_DomainSimi(Domain.Count, a_b3, a3, b3);
+      if a_b4 > 0 then
+        value4 := Get_DomainSimi(Domain.Count, a_b4, a4, b4);
+
+      Value5 := 0; Diff1 := 0; Diff2 := 0; a5 := 0; b5 := 0; a_b5 := 0;
+      for l := 0 to high(Complex_Node_Set) do
+      begin
+        if Matrix_Complex[Valid_Proteins[i]][l] = 1 then
+        begin
+          Diff1 := Diff1 + complex_score[l];
+          a5 := a5 + 1;
+        end;
+        if Matrix_Complex[Valid_Proteins[j]][l] = 1 then
+        begin
+          Diff2 := Diff2 + complex_score[l];
+          b5 := b5 + 1;
+        end;
+        if Matrix_Complex[Valid_Proteins[i]][l] * Matrix_Complex[Valid_Proteins[j]][l] = 1 then
+        begin
+          Value5 := Value5 + complex_score[l];
+          a_b5 := a_b5 + 1;
+        end;
+
+      end;
+
+      if Diff1 * Diff2 <> 0 then
+        Value5 := (Value5 * Value5) / (Diff1 * Diff2)
+      else
+        Value5 := 0;
+      if (v_ecc > 0) or (value1 > 0) or (value2 > 0) or (value3 > 0) or (value4 > 0) or (value5 > 0) then
+      begin
+        WriteStr := WriteStr + FloatToStr(v_ecc) + #9 + FloatToStr(value1) + #9 + FloatToStr(value2) + #9 + FloatToStr(value3) + #9 + FloatToStr(value4) + #9 + FloatToStr(value5);
+        Writeln(f, WriteStr);
+        //memo2.Lines.Add(WriteStr);
+      end;
+      Application.ProcessMessages;
+    end; //for j := i + 1 to high(Valid_Proteins) do
+   //
+
+  end; //for i := low(Valid_Proteins) to high(Valid_Proteins) - 1 do
+  CloseFile(f);
+  //Memo2.Lines.SaveToFile('weight.txt');
+  Button1.Enabled := True;
+end;
+
+//--------------------------Ten-Fold cross validation---------------------------
+procedure TForm1.Button12Click(Sender: TObject);
+var
+  i, j, k, C_Num, L: integer;
+  TenFold: array of array of integer;
+
+begin
+  Button1.Enabled := False;
+  Button12.Enabled := False;
+  Checkbox1.Checked := True;
+  setlength(TenFold, 10);
+  for i := 0 to Nodes.Count - 1 do
+    NodeInfo[i].Visited := 0;
+
+  for i := 0 to high(TenFold) - 1 do
+  begin
+    L := Round(length(NodeInfo) * 0.1);
+    Setlength(TenFold[i], 0);
+    for j := 0 to L - 1 do
+    begin
+      while 1 = 1 do
+      begin
+        Randomize;
+        k := Random(length(NodeInfo));
+        if NodeInfo[k].Visited = 0 then
+          break;
+      end;
+      setlength(TenFold[i], length(TenFold[i]) + 1);
+      TenFold[i][high(TenFold[i])] := k;
+      NodeInfo[k].Visited := 1;
+    end; //for j := 0 to L - 1 do
+  end; // for i := 0 to high(TenFold) - 1 d
+
+
+  for i := 0 to Nodes.Count - 1 do
+    if NodeInfo[i].Visited = 0 then
+    begin
+      setlength(TenFold[high(TenFold)], length(TenFold[high(TenFold)]) + 1);
+      TenFold[high(TenFold)][high(TenFold[high(TenFold)])] := i;
+    end;
+
+  Memo2.Lines.Clear;
+
+
+  for i := 0 to high(TenFold) do
+  begin
+
+    for j := low(NodeInfo) to high(NodeInfo) do
+      NodeInfo[j].Unknown := 0;
+
+    for j := 0 to high(TenFold[i]) do
+      NodeInfo[TenFold[i][j]].Unknown := 1;
+
+              Button9.Click;
+    sleep(10);
+    application.ProcessMessages;
+
+
+
+    Application.ProcessMessages;
+  end;
+  Button1.Enabled := True;
+  Button12.Enabled := True;
+end;
+
+end.
